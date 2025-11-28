@@ -170,6 +170,31 @@ class ParserRMD:
             print(f"{i:02d}: {s}")
         print("====================================\n")
 
+
+# LEFT-MOST DERIVATION PARSER
+class ParserLMD(ParserRMD):
+    def __init__(self, tokens: List[Token]):
+        super().__init__(tokens)
+        # Reset sentential forms for left-most parsing trace
+        self.sentential = ['S']
+        self.sent_forms = []
+        self.record()
+
+    def expand(self, nonterm, rhs):
+        # left-most expansion: find the first occurrence
+        for i in range(len(self.sentential)):
+            if self.sentential[i] == nonterm:
+                self.sentential = self.sentential[:i] + rhs + self.sentential[i+1:]
+                self.record()
+                return
+        raise RuntimeError(f"Nonterminal {nonterm} not found")
+
+    def print_derivation(self):
+        print("\n=== LEFT-MOST DERIVATION STEPS ===")
+        for i, s in enumerate(self.sent_forms):
+            print(f"{i:02d}: {s}")
+        print("====================================\n")
+
 # PHASE 3 — SEMANTIC ANALYZER
 
 class SemanticAnalyzer:
@@ -283,6 +308,11 @@ if __name__ == "__main__":
     parser = ParserRMD(tokens)
     parser.parse()
     parser.print_derivation()
+
+    # PHASE 2b: PARSING (LMD)
+    parser_l = ParserLMD(tokens)
+    parser_l.parse()
+    parser_l.print_derivation()
 
     # PHASE 3: SEMANTICS
     sem = SemanticAnalyzer(tokens)
