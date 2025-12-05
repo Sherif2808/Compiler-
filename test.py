@@ -1,0 +1,401 @@
+import re #regular expression (regex)
+from typing import List, Tuple
+import argparse
+import textwrap
+import sys
+Token = Tuple[str, str]
+
+# PHASE 1 — LEXICAL ANALYZER
+
+token_specification = [
+    ('WHILE',      r'while\b'), # r make / not treated as a character
+    ('PRINTF',     r'printf\b'), #\b word boundary
+    # Operators
+    ('EQ',         r'=='),
+    ('NEQ',        r'!='),
+    ('LESS',       r'<'),
+    ('GREATER',    r'>'),
+    ('INC',        r'\+\+'),
+
+    # Symbols
+    ('LPAREN',     r'\('),
+    ('RPAREN',     r'\)'),
+    ('LBRACE',     r'\{'),
+    ('RBRACE',     r'\}'),
+    ('COMMA',      r','),
+    ('SEMICOLON',  r';'),
+
+    # Literals
+    ('STRING',     r'"[^"]*"'),
+    ('NUM',        r'\d+'),
+    ('ID',         r'[A-Za-z_][A-Za-z0-9_]*'), #First character must be letter or _ //// Remaining characters can include letters, digits, or _
+
+ # WHITESPACE (NEEDED!!)
+    ('NEWLINE',    r'\n'),
+    ('SKIP',       r'[ \t]+'),
+    
+    ('MISMATCH',   r'.'),
+]
+
+tok_regex = '|'.join(f'(?P<{name}>{pattern})' for name, pattern in token_specification)
+
+def tokenize(code):
+    tokens = []
+    for mo in re.finditer(tok_regex, code):
+        kind = mo.lastgroup
+        value = mo.group()
+
+        if kind in ('NEWLINE', 'SKIP'):
+            continue
+        elif kind == 'MISMATCH':
+            raise RuntimeError(f'Unexpected character {value}')
+        else:
+            tokens.append((kind, value))
+    return tokens
+
+# PHASE 2 — RIGHT-MOST DERIVATION PARSER
+
+class ParserRMD:
+    def __init__(self, tokens: List[Token]):
+        self.tokens = [t[0] for t in tokens]
+        self.lexemes = [t[1] for t in tokens]
+        self.pos = 0
+
+        self.sentential = ['S']
+        self.sent_forms = []
+        self.record()
+
+    def record(self):
+        self.sent_forms.append(' '.join(self.sentential))
+
+    def peek(self):
+        return self.tokens[self.pos] if self.pos < len(self.tokens) else 'EOF'
+
+    def accept(self, expected):
+        if self.peek() == expected:
+            self.pos += 1
+            return True
+        return False
+
+    def expect(self, expected):
+        if not self.accept(expected):
+            raise SyntaxError(f"Expected {expected} but got {self.peek()}")
+
+    def expand(self, nonterm, rhs):
+        for i in range(len(self.sentential)-1, -1, -1):
+            if self.sentential[i] == nonterm:
+                self.sentential = self.sentential[:i] + rhs + self.sentential[i+1:]
+                self.record()
+                return
+        raise RuntimeError(f"Nonterminal {nonterm} not found")
+
+    # Parsing Logic
+
+    def parse(self):
+        ok = self.parse_S()
+        if self.pos != len(self.tokens):
+            raise SyntaxError("Extra tokens found after parsing.")
+        return ok
+
+    def parse_S(self):
+        self.expand('S', ['WHILE','LPAREN','CND','RPAREN','LBRACE','STMTS','RBRACE'])
+
+        self.expect('WHILE')
+        self.expect('LPAREN')
+        self.parse_CND()
+        self.expect('RPAREN')
+        self.expect('LBRACE')
+        self.parse_STMTS()
+        self.expect('RBRACE')
+        return True
+
+    def parse_CND(self):
+        self.expand('CND', ['ID','OP','EXPR'])
+
+        self.expect('ID')
+
+        if self.peek() in ('LESS','GREATER','EQ','NEQ'):
+            self.accept(self.peek())
+        else:
+            raise SyntaxError("Expected comparison operator")
+
+        if self.peek() == 'NUM':
+            self.accept('NUM')
+        elif self.peek() == 'ID':
+            self.accept('ID')
+        else:
+            raise SyntaxError("Expected NUM or ID in expression")
+
+        return True
+
+    def parse_STMTS(self):
+        if self.peek() == 'RBRACE':
+            self.expand('STMTS', [])
+            return True
+
+        self.expand('STMTS', ['STMT','STMTS'])
+        self.parse_STMT()
+        return self.parse_STMTS()
+
+    def parse_STMT(self):
+        if self.peek() == 'PRINTF':
+            return self.parse_PRINT()
+        elif self.peek() == 'ID':
+            return self.parse_INC()
+        else:
+            raise SyntaxError("Expected a statement")
+
+    def parse_PRINT(self):
+        self.expand('STMT', ['PRINTSTMT'])
+        self.expand('PRINTSTMT', ['PRINTF','LPAREN','STRING','COMMA','ID','RPAREN','SEMICOLON'])
+
+        self.expect('PRINTF')
+        self.expect('LPAREN')
+        self.expect('STRING')
+        self.expect('COMMA')
+        self.expect('ID')
+        self.expect('RPAREN')
+        self.expect('SEMICOLON')
+        return True
+
+    def parse_INC(self):
+        self.expand('STMT', ['ASSIGN'])
+        self.expand('ASSIGN', ['ID','INC','SEMICOLON'])
+
+        self.expect('ID')
+        self.expect('INC')
+        self.expect('SEMICOLON')
+        return True
+
+    def print_derivation(self):
+        print("\n=== RIGHT-MOST DERIVATION STEPS ===")
+        for i, s in enumerate(self.sent_forms):
+            print(f"{i:02d}: {s}")
+        print("====================================\n")
+        # Also show the final terminal sequence using actual lexemes
+        try:
+            # final_sent is the last recorded sentential form
+            final_sent = self.sent_forms[-1].split()
+            # Map terminal names in final_sent to lexemes in order
+            lexeme_seq = []
+            lexemes_iter = iter(self.lexemes)
+            for sym in final_sent:
+                # assume terminals are in all-caps and nonterminals contain lowercase
+                if sym.isupper():
+                    # get next lexeme
+                    try:
+                        lx = next(lexemes_iter)
+                    except StopIteration:
+                        lx = sym
+                    lexeme_seq.append(lx)
+                else:
+                    lexeme_seq.append(sym)
+
+            print("Final terminals with lexemes:")
+            print(' '.join(lexeme_seq))
+            print()
+        except Exception:
+            # if anything goes wrong, skip lexeme view silently
+            pass
+
+
+# LEFT-MOST DERIVATION PARSER
+class ParserLMD(ParserRMD):
+    def __init__(self, tokens: List[Token]):
+        super().__init__(tokens)
+        # Reset sentential forms for left-most parsing trace
+        self.sentential = ['S']
+        self.sent_forms = []
+        self.record()
+
+    def expand(self, nonterm, rhs):
+        # left-most expansion: find the first occurrence
+        for i in range(len(self.sentential)):
+            if self.sentential[i] == nonterm:
+                self.sentential = self.sentential[:i] + rhs + self.sentential[i+1:]
+                self.record()
+                return
+        raise RuntimeError(f"Nonterminal {nonterm} not found")
+
+    def print_derivation(self):
+        print("\n=== LEFT-MOST DERIVATION STEPS ===")
+        for i, s in enumerate(self.sent_forms):
+            print(f"{i:02d}: {s}")
+        print("====================================\n")
+
+# PHASE 3 — SEMANTIC ANALYZER
+
+class SemanticAnalyzer:
+    def __init__(self, tokens: List[Token]):
+        self.tokens = tokens
+        self.pos = 0
+        self.symbols = {}
+        self.messages = []
+
+    def peek(self):
+        return self.tokens[self.pos] if self.pos < len(self.tokens) else ('EOF','')
+
+    def advance(self):
+        t = self.peek()
+        self.pos += 1
+        return t
+
+    def expect(self, token_type):
+        if self.peek()[0] != token_type:
+            raise Exception(f"Semantic Error: expected {token_type}, got {self.peek()}")
+        return self.advance()
+
+    def expect_any(self, token_types):
+        """Expect one of token_types (iterable) and return the consumed token."""
+        t = self.peek()
+        if t[0] not in token_types:
+            raise Exception(f"Semantic Error: expected one of {token_types}, got {t}")
+        return self.advance()
+
+    def current_type(self):
+        return self.peek()[0]
+
+    def analyze(self):
+        self._parse_program()
+        self.messages.append("Semantic Analysis Completed Successfully.")
+        return self.messages
+
+    def _add_symbol(self, name):
+        if name not in self.symbols:
+            self.symbols[name] = "int"
+            self.messages.append(f"Symbol: '{name}' added to table as int")
+
+    def _parse_program(self):
+        self.expect('WHILE')
+        self.expect('LPAREN')
+        self._parse_condition()
+        self.expect('RPAREN')
+        self.expect('LBRACE')
+        self._parse_statements()
+        self.expect('RBRACE')
+
+    def _parse_condition(self):
+        # left operand must be an identifier
+        left_tok = self.expect('ID')
+        left = left_tok[1]
+        self._add_symbol(left)
+
+        # operator must be one of the comparison ops
+        op_tok = self.expect_any(('LESS','GREATER','EQ','NEQ'))
+        op = op_tok[0]
+
+        # right side can be ID or NUM
+        if self.current_type() == 'ID':
+            right = self.expect('ID')[1]
+            self._add_symbol(right)
+        elif self.current_type() == 'NUM':
+            right = self.expect('NUM')[1]
+        else:
+            raise Exception(f"Right side of condition invalid: got {self.peek()}")
+
+        self.messages.append(f"Condition '{left} {op} {right}' is semantically valid.")
+
+    def _parse_statements(self):
+        while self.peek()[0] != 'RBRACE':
+            if self.peek()[0] == 'PRINTF':
+                self._parse_printf()
+            elif self.peek()[0] == 'ID':
+                self._parse_increment()
+            else:
+                raise Exception(f"Unexpected token in block: {self.peek()}")
+
+    def _parse_printf(self):
+        self.expect('PRINTF')
+        self.expect('LPAREN')
+        str_tok = self.expect('STRING')
+        fmt = str_tok[1][1:-1]
+        # require a comma then an identifier argument
+        self.expect('COMMA')
+        if self.current_type() != 'ID':
+            raise Exception(f"Printf expects identifier as argument, got {self.peek()}")
+        arg = self.expect('ID')[1]
+        self._add_symbol(arg)
+        self.expect('RPAREN')
+        self.expect('SEMICOLON')
+
+        # very small format-string validation: expect exactly one %d
+        if fmt.count('%d') != 1:
+            raise Exception("Printf expects exactly one %d in format string")
+        self.messages.append(f"Printf call is semantically valid with arg '{arg}'.")
+
+    def _parse_increment(self):
+        name = self.expect('ID')[1]
+        self._add_symbol(name)
+        self.expect('INC')
+        self.expect('SEMICOLON')
+        self.messages.append(f"Increment '{name}++' is semantically valid.")
+
+# MAIN DRIVER
+
+def main(argv=None):
+    p = argparse.ArgumentParser(description="Simple compiler demo: lex/parse/semantic check")
+    p.add_argument('-f', '--file', help='Path to source file to analyze')
+    args = p.parse_args(argv)
+
+    if args.file:
+        try:
+            with open(args.file, 'r', encoding='utf-8') as fh:
+                code = fh.read()
+        except OSError as e:
+            print(f"Error reading file: {e}")
+            sys.exit(2)
+    else:
+        code = textwrap.dedent('''\
+            while (i < 5) {
+                printf("%d\\n", i);
+                i++;
+            }
+        ''')
+
+    print("=== SOURCE CODE ===")
+    print(code)
+
+    # PHASE 1: LEXING
+    try:
+        tokens = tokenize(code)
+    except Exception as e:
+        print(f"Lexing error: {e}")
+        sys.exit(1)
+
+    print("\n=== TOKENS ===")
+    for t in tokens:
+        print(f"{t[0]:12} -> {t[1]}")
+
+    # PHASE 2: PARSING (RMD)
+    try:
+        parser = ParserRMD(tokens)
+        parser.parse()
+        parser.print_derivation()
+    except Exception as e:
+        print(f"Parsing (RMD) error: {e}")
+        sys.exit(1)
+
+    # PHASE 2b: PARSING (LMD)
+    try:
+        parser_l = ParserLMD(tokens)
+        parser_l.parse()
+        parser_l.print_derivation()
+    except Exception as e:
+        print(f"Parsing (LMD) error: {e}")
+        sys.exit(1)
+
+    # PHASE 3: SEMANTICS
+    try:
+        sem = SemanticAnalyzer(tokens)
+        messages = sem.analyze()
+    except Exception as e:
+        print(f"Semantic analysis error: {e}")
+        sys.exit(1)
+
+    print("=== SEMANTIC ANALYSIS ===")
+    for msg in messages:
+        print(msg)
+
+
+if __name__ == '__main__':
+    main()
