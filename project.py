@@ -1,5 +1,8 @@
 import re #regular expression (regex)
 from typing import List, Tuple
+import argparse
+import textwrap
+import sys
 Token = Tuple[str, str]
 
 # PHASE 1 — LEXICAL ANALYZER
@@ -169,6 +172,31 @@ class ParserRMD:
         for i, s in enumerate(self.sent_forms):
             print(f"{i:02d}: {s}")
         print("====================================\n")
+        # Also show the final terminal sequence using actual lexemes
+        try:
+            # final_sent is the last recorded sentential form
+            final_sent = self.sent_forms[-1].split()
+            # Map terminal names in final_sent to lexemes in order
+            lexeme_seq = []
+            lexemes_iter = iter(self.lexemes)
+            for sym in final_sent:
+                # assume terminals are in all-caps and nonterminals contain lowercase
+                if sym.isupper():
+                    # get next lexeme
+                    try:
+                        lx = next(lexemes_iter)
+                    except StopIteration:
+                        lx = sym
+                    lexeme_seq.append(lx)
+                else:
+                    lexeme_seq.append(sym)
+
+            print("Final terminals with lexemes:")
+            print(' '.join(lexeme_seq))
+            print()
+        except Exception:
+            # if anything goes wrong, skip lexeme view silently
+            pass
 
 
 # LEFT-MOST DERIVATION PARSER
@@ -197,12 +225,32 @@ class ParserLMD(ParserRMD):
 
 # PHASE 3 — SEMANTIC ANALYZER
 
+class ASTNode:
+    """Represents a node in the Abstract Syntax Tree."""
+    def __init__(self, node_type, value=None, children=None):
+        self.node_type = node_type
+        self.value = value
+        self.children = children if children is not None else []
+
+    def add_child(self, child):
+        self.children.append(child)
+
+    def print_tree(self, indent=0, prefix=""):
+        """Print the AST as a tree structure."""
+        connector = "├── " if prefix == "" else prefix
+        print("  " * indent + connector + f"{self.node_type}" + (f": {self.value}" if self.value else ""))
+        for i, child in enumerate(self.children):
+            is_last = i == len(self.children) - 1
+            child_prefix = "└── " if is_last else "├── "
+            child.print_tree(indent + 1, child_prefix)
+
 class SemanticAnalyzer:
     def __init__(self, tokens: List[Token]):
         self.tokens = tokens
         self.pos = 0
         self.symbols = {}
         self.messages = []
+        self.ast_root = None
 
     def peek(self):
         return self.tokens[self.pos] if self.pos < len(self.tokens) else ('EOF','')
@@ -217,10 +265,28 @@ class SemanticAnalyzer:
             raise Exception(f"Semantic Error: expected {token_type}, got {self.peek()}")
         return self.advance()
 
+    def expect_any(self, token_types):
+        """Expect one of token_types (iterable) and return the consumed token."""
+        t = self.peek()
+        if t[0] not in token_types:
+            raise Exception(f"Semantic Error: expected one of {token_types}, got {t}")
+        return self.advance()
+
+    def current_type(self):
+        return self.peek()[0]
+
     def analyze(self):
+        self.ast_root = ASTNode("Program")
         self._parse_program()
         self.messages.append("Semantic Analysis Completed Successfully.")
         return self.messages
+
+    def print_ast(self):
+        """Print the Abstract Syntax Tree."""
+        print("\n=== ABSTRACT SYNTAX TREE ===")
+        if self.ast_root:
+            self.ast_root.print_tree()
+        print("="*27 + "\n")
 
     def _add_symbol(self, name):
         if name not in self.symbols:
@@ -230,53 +296,82 @@ class SemanticAnalyzer:
     def _parse_program(self):
         self.expect('WHILE')
         self.expect('LPAREN')
-        self._parse_condition()
+        cond_node = self._parse_condition()
         self.expect('RPAREN')
         self.expect('LBRACE')
-        self._parse_statements()
+        stmts_node = self._parse_statements()
         self.expect('RBRACE')
+        
+        # Build AST
+        while_node = ASTNode("WhileLoop")
+        while_node.add_child(cond_node)
+        while_node.add_child(stmts_node)
+        self.ast_root.add_child(while_node)
 
     def _parse_condition(self):
-        left = self.expect('ID')[1]
+        # left operand must be an identifier
+        left_tok = self.expect('ID')
+        left = left_tok[1]
         self._add_symbol(left)
 
-        op = self.advance()[0]
-        if op not in ('LESS','GREATER','EQ','NEQ'):
-            raise Exception("Invalid operator in condition")
+        # operator must be one of the comparison ops
+        op_tok = self.expect_any(('LESS','GREATER','EQ','NEQ'))
+        op = op_tok[0]
 
-        rhs = self.peek()
-        if rhs[0] == 'ID':
+        # right side can be ID or NUM
+        if self.current_type() == 'ID':
             right = self.expect('ID')[1]
             self._add_symbol(right)
-        elif rhs[0] == 'NUM':
+        elif self.current_type() == 'NUM':
             right = self.expect('NUM')[1]
         else:
-            raise Exception("Right side of condition invalid")
+            raise Exception(f"Right side of condition invalid: got {self.peek()}")
 
         self.messages.append(f"Condition '{left} {op} {right}' is semantically valid.")
+        
+        # Build AST node for condition
+        cond_node = ASTNode("Condition")
+        cond_node.add_child(ASTNode("Identifier", left))
+        cond_node.add_child(ASTNode("Operator", op))
+        cond_node.add_child(ASTNode("Value", right))
+        return cond_node
 
     def _parse_statements(self):
+        stmts_node = ASTNode("Statements")
         while self.peek()[0] != 'RBRACE':
             if self.peek()[0] == 'PRINTF':
-                self._parse_printf()
+                stmt_node = self._parse_printf()
             elif self.peek()[0] == 'ID':
-                self._parse_increment()
+                stmt_node = self._parse_increment()
             else:
                 raise Exception(f"Unexpected token in block: {self.peek()}")
+            stmts_node.add_child(stmt_node)
+        return stmts_node
 
     def _parse_printf(self):
         self.expect('PRINTF')
         self.expect('LPAREN')
-        fmt = self.expect('STRING')[1][1:-1]
+        str_tok = self.expect('STRING')
+        fmt = str_tok[1][1:-1]
+        # require a comma then an identifier argument
         self.expect('COMMA')
+        if self.current_type() != 'ID':
+            raise Exception(f"Printf expects identifier as argument, got {self.peek()}")
         arg = self.expect('ID')[1]
         self._add_symbol(arg)
         self.expect('RPAREN')
         self.expect('SEMICOLON')
 
+        # very small format-string validation: expect exactly one %d
         if fmt.count('%d') != 1:
-            raise Exception("Printf expects exactly one %d")
+            raise Exception("Printf expects exactly one %d in format string")
         self.messages.append(f"Printf call is semantically valid with arg '{arg}'.")
+        
+        # Build AST node for printf
+        printf_node = ASTNode("Printf")
+        printf_node.add_child(ASTNode("Format", fmt))
+        printf_node.add_child(ASTNode("Argument", arg))
+        return printf_node
 
     def _parse_increment(self):
         name = self.expect('ID')[1]
@@ -284,39 +379,75 @@ class SemanticAnalyzer:
         self.expect('INC')
         self.expect('SEMICOLON')
         self.messages.append(f"Increment '{name}++' is semantically valid.")
+        
+        # Build AST node for increment
+        inc_node = ASTNode("Increment")
+        inc_node.add_child(ASTNode("Identifier", name))
+        return inc_node
 
 # MAIN DRIVER
 
-if __name__ == "__main__":
-    code = """
-    while (i < 5) {
-        printf("%d\\n", i);
-        i++;
-    }
-    """
+def main(argv=None):
+    p = argparse.ArgumentParser(description="Simple compiler demo: lex/parse/semantic check")
+    p.add_argument('-f', '--file', help='Path to source file to analyze')
+    args = p.parse_args(argv)
+
+    if args.file:
+        try:
+            with open(args.file, 'r', encoding='utf-8') as fh:
+                code = fh.read()
+        except OSError as e:
+            print(f"Error reading file: {e}")
+            sys.exit(2)
+    else:
+        code = textwrap.dedent('''\
+            while (i < 5) {
+                printf("%d\\n", i);
+                i++;
+            }
+        ''')
 
     print("=== SOURCE CODE ===")
     print(code)
 
     # PHASE 1: LEXING
-    tokens = tokenize(code)
+    try:
+        tokens = tokenize(code)
+    except Exception as e:
+        print(f"Lexing error: {e}")
+        sys.exit(1)
+
     print("\n=== TOKENS ===")
     for t in tokens:
         print(f"{t[0]:12} -> {t[1]}")
 
     # PHASE 2: PARSING (RMD)
-    parser = ParserRMD(tokens)
-    parser.parse()
-    parser.print_derivation()
+    try:
+        parser = ParserRMD(tokens)
+        parser.parse()
+        parser.print_derivation()
+    except Exception as e:
+        print(f"Parsing (RMD) error: {e}")
+        sys.exit(1)
 
-    # PHASE 2b: PARSING (LMD)
-    parser_l = ParserLMD(tokens)
-    parser_l.parse()
-    parser_l.print_derivation()
+
 
     # PHASE 3: SEMANTICS
-    sem = SemanticAnalyzer(tokens)
-    messages = sem.analyze()
+    try:
+        sem = SemanticAnalyzer(tokens)
+        messages = sem.analyze()
+    except Exception as e:
+        print(f"Semantic analysis error: {e}")
+        sys.exit(1)
+
     print("=== SEMANTIC ANALYSIS ===")
     for msg in messages:
         print(msg)
+    
+    # Print AST
+    sem.print_ast()
+
+
+if __name__ == '__main__':
+    main()
+
